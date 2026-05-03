@@ -1,57 +1,85 @@
-import librosa
+"""
+audio_analysis.py
+-----------------
+Responsible for ONE thing only:
+    Load audio and return a normalized energy array.
+
+No execution, no plotting, no cutting.
+Just pure functions that main.py calls.
+"""
+
 import numpy as np
-import matplotlib.pyplot as plt
-from clip_detector import detect_peaks
+import librosa
 
-# Path (since you're running from project root)
-audio_path = "../Output/audio.wav"
 
-# Load audio
-y, sr = librosa.load(audio_path)
+# ── Constants (used as defaults, can be overridden by caller) ─────────────────
+FRAME_LENGTH = 2048
+HOP_LENGTH   = 512
 
-# Frame settings
-frame_length = 2048
-hop_length = 512
 
-# Compute energy over time
-energy = np.array([
-    np.sum(np.abs(y[i:i+frame_length])**2)
-    for i in range(0, len(y), hop_length)
-])
+def load_audio(audio_path: str) -> tuple[np.ndarray, int]:
+    """
+    Load a .wav file using librosa.
 
-# Normalize
-energy = energy / np.max(energy)
+    Args:
+        audio_path: Path to the .wav file.
 
-# Debug info
-print("Energy extracted:", len(energy))
-print("Max value:", np.max(energy))
-print("Mean energy:", np.mean(energy))
-print("Min energy:", np.min(energy))
+    Returns:
+        (y, sr) — audio time series and sample rate.
+    """
+    print(f"[Audio] Loading: {audio_path}")
+    y, sr = librosa.load(audio_path)
+    print(f"[Audio] Loaded — duration: {len(y) / sr:.1f}s  |  sample rate: {sr}Hz")
+    return y, sr
 
-# Dynamic threshold (important)
-threshold = np.mean(energy) + 0.5 * np.std(energy)
-print("Using threshold:", threshold)
 
-# Detect peaks
-peaks = detect_peaks(energy, threshold=threshold, min_gap=10)
+def compute_energy(
+    y:            np.ndarray,
+    sr:           int,
+    frame_length: int = FRAME_LENGTH,
+    hop_length:   int = HOP_LENGTH,
+) -> np.ndarray:
+    """
+    Compute normalized short-time RMS energy from an audio signal.
 
-print("\n🔥 Detected highlight segments (frames):")
-from clip_detector import merge_segments
+    Args:
+        y:            Audio time series (from load_audio).
+        sr:           Sample rate (from load_audio).
+        frame_length: FFT frame size in samples.
+        hop_length:   Hop size between frames in samples.
 
-clean_peaks = merge_segments(peaks)
+    Returns:
+        1-D numpy array of normalized energy values in [0, 1].
+    """
+    energy = librosa.feature.rms(
+        y=y,
+        frame_length=frame_length,
+        hop_length=hop_length,
+    )[0]
 
-print("\n🎯 Clean highlight segments:")
-print(clean_peaks)
+    # normalize to [0, 1] so threshold logic is consistent across different videos
+    energy /= energy.max()
 
-# Plot graph
-plt.figure(figsize=(12, 4))
-plt.plot(energy)
+    print(f"[Audio] Energy frames: {len(energy)}")
+    print(f"[Audio] max={energy.max():.3f}  mean={energy.mean():.3f}  min={energy.min():.3f}")
 
-# Highlight detected segments
-for start, end in peaks:
-    plt.axvspan(start, end, alpha=0.3)
+    return energy
 
-plt.title("Audio Energy with Detected Highlights")
-plt.xlabel("Time Frames")
-plt.ylabel("Normalized Energy")
-plt.show()
+
+def compute_threshold(energy: np.ndarray, sensitivity: float = 0.5) -> float:
+    """
+    Compute a dynamic threshold based on mean + (sensitivity * std).
+
+    Higher sensitivity → lower threshold → more peaks detected.
+    Lower sensitivity  → higher threshold → only the loudest moments.
+
+    Args:
+        energy:      Normalized energy array (from compute_energy).
+        sensitivity: Multiplier on std deviation. Default 0.5 works well for streams.
+
+    Returns:
+        Float threshold value.
+    """
+    threshold = float(energy.mean() + sensitivity * energy.std())
+    print(f"[Audio] Threshold: {threshold:.3f}  (sensitivity={sensitivity})")
+    return threshold

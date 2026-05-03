@@ -1,36 +1,65 @@
 import numpy as np
 
-def detect_peaks(energy, threshold=0.3, min_gap=10):
-    peaks = []
 
+def detect_peaks(
+    energy: np.ndarray,
+    threshold: float = 0.3,
+    min_gap: int = 10,
+) -> list[tuple[int, int]]:
+    """
+    Return (start, end) frame pairs where energy exceeds `threshold`
+    for at least `min_gap` consecutive frames.
+    """
+    peaks = []
     i = 0
-    while i < len(energy):
+    n = len(energy)
+
+    while i < n:
         if energy[i] > threshold:
             start = i
 
-            while i < len(energy) and energy[i] > threshold:
+            # advance until energy drops back below threshold
+            while i < n and energy[i] > threshold:
                 i += 1
 
-            end = i
+            end = i  # exclusive, consistent with Python slice convention
 
-            if end - start > min_gap:
+            if (end - start) >= min_gap:
                 peaks.append((start, end))
-        i += 1
+            # do NOT increment i here — it already points past this peak
+
+        else:
+            i += 1  # only step forward when we're in a quiet region
 
     return peaks
-def merge_segments(segments, max_gap=30):
+
+
+def merge_segments(
+    segments: list[tuple[int, int]],
+    max_gap: int = 10,          # ← frames, not seconds (fix unit mismatch)
+) -> list[tuple[int, int]]:
+    """
+    Merge consecutive segments whose inter-segment gap is within `max_gap` frames.
+
+    Args:
+        segments: Sorted list of (start_frame, end_frame) pairs.
+        max_gap:  Maximum allowed gap in **frames** between two segments
+                  before they are kept separate.
+    """
     if not segments:
         return []
 
+    # be defensive: sort so callers don't have to guarantee order
+    segments = sorted(segments)
     merged = [segments[0]]
 
-    for current in segments[1:]:
-        last = merged[-1]
+    for start, end in segments[1:]:
+        prev_start, prev_end = merged[-1]
 
-        # if close → merge
-        if current[0] - last[1] <= max_gap:
-            merged[-1] = (last[0], current[1])
+        if start <= prev_end + max_gap:
+            # extend the last segment instead of appending a new one
+            merged[-1] = (prev_start, max(prev_end, end))
         else:
-            merged.append(current)
+            merged.append((start, end))
 
     return merged
