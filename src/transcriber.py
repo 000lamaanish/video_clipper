@@ -54,23 +54,30 @@ def load_model(model_size: str = MODEL_SIZE) -> whisper.Whisper:
 
 def transcribe_segments(
     audio_path:   str,
-    peak_times:   list[tuple[float, float]],  # (start_sec, end_sec) from energy peaks
+    peak_times:   list[tuple[float, float]],
     model:        whisper.Whisper,
-    temp_dir:     str = "output/temp_chunks",
+    temp_dir:     str = None,
 ) -> list[TranscribedSegment]:
     """
     Transcribe ONLY the peak regions instead of the full audio.
-    This is the key speed improvement — avoids processing silence/background.
 
     Args:
         audio_path:  Path to full .wav file.
         peak_times:  List of (start_sec, end_sec) for each energy peak.
         model:       Loaded Whisper model.
-        temp_dir:    Directory for temporary audio chunks (auto-cleaned).
+        temp_dir:    Directory for temp audio chunks. Defaults to a folder
+                     next to the audio file so it always resolves correctly.
 
     Returns:
         List of TranscribedSegment with timestamps relative to original audio.
     """
+    # always resolve to absolute path — Streamlit changes cwd which breaks
+    # relative paths like "output/temp_chunks"
+    if temp_dir is None:
+        audio_abs = os.path.abspath(audio_path)
+        temp_dir  = os.path.join(os.path.dirname(audio_abs), "temp_chunks")
+
+    temp_dir = os.path.abspath(temp_dir)
     os.makedirs(temp_dir, exist_ok=True)
 
     # load full audio once
@@ -79,6 +86,7 @@ def transcribe_segments(
     all_segments = []
 
     print(f"[Whisper] Transcribing {len(peak_times)} peak regions …")
+    print(f"[Whisper] Temp dir: {temp_dir}")
 
     for i, (start_s, end_s) in enumerate(peak_times):
         # slice the audio chunk
@@ -89,7 +97,7 @@ def transcribe_segments(
         if len(chunk) == 0:
             continue
 
-        # write temp chunk
+        # write temp chunk using absolute path
         chunk_path = os.path.join(temp_dir, f"chunk_{i:03d}.wav")
         sf.write(chunk_path, chunk, sr)
 
@@ -104,7 +112,7 @@ def transcribe_segments(
         # collect segments, adjusting timestamps back to original audio time
         for seg in result["segments"]:
             text  = seg["text"].strip()
-            start = start_s + seg["start"]   # offset back to original timeline
+            start = start_s + seg["start"]
             end   = start_s + seg["end"]
 
             all_segments.append(TranscribedSegment(
@@ -116,12 +124,17 @@ def transcribe_segments(
             ))
 
         # clean up temp chunk
-        os.remove(chunk_path)
+        if os.path.exists(chunk_path):
+            os.remove(chunk_path)
+
         print(f"  [{i+1:02d}/{len(peak_times)}] {start_s:.1f}s → {end_s:.1f}s  transcribed")
 
     # clean up temp dir if empty
-    if not os.listdir(temp_dir):
-        os.rmdir(temp_dir)
+    try:
+        if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+            os.rmdir(temp_dir)
+    except OSError:
+        pass  # not critical if cleanup fails
 
     print(f"[Whisper] Done — {len(all_segments)} segments transcribed.")
     return all_segments
@@ -151,7 +164,7 @@ def get_high_value_segments(
     filtered.sort(key=lambda s: s.keyword_score, reverse=True)
 
     print(f"[Whisper] Hype segments found: {len(filtered)}")
-    for s in filtered[:10]:   # show top 10
+    for s in filtered[:10]:
         print(f"  [{s.start:.1f}s → {s.end:.1f}s]  kw={s.keyword_score}  | {s.text}")
 
     return filtered
