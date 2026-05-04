@@ -7,11 +7,11 @@ Responsible for ONE thing only:
     for video cutting.
 
 Rules applied (in order):
-    1. Enforce min/max duration
-    2. Resolve overlaps by trimming (keep both clips)
-    3. Apply padding (±N seconds around each clip)
-    4. Clamp to video bounds
-    5. Final duration check after padding
+    1. Apply padding (±N seconds around each clip)
+    2. Enforce max duration (trim from end)
+    3. Enforce min duration
+    4. Resolve overlaps by trimming (keep both clips)
+    5. Final duration check (relaxed — only drop if truly unusable)
 """
 
 from dataclasses import dataclass
@@ -19,10 +19,11 @@ from scorer import ScoredSegment
 
 
 # ── Config defaults ───────────────────────────────────────────────────────────
-MIN_DURATION_S  = 30.0    # shortest allowed clip (seconds)
-MAX_DURATION_S  = 60.0    # longest allowed clip (seconds)
-PADDING_S       = 3.0     # seconds added before start and after end
-MIN_GAP_S       = 2.0     # minimum gap to enforce between two clips after trimming
+MIN_DURATION_S      = 30.0
+MAX_DURATION_S      = 60.0
+PADDING_S           = 3.0
+MIN_GAP_S           = 2.0
+POST_TRIM_MIN_S     = 15.0   # relaxed minimum after overlap trimming
 
 
 @dataclass
@@ -30,7 +31,7 @@ class CleanSegment:
     """A validated, padded, overlap-resolved clip ready for cutting."""
     start_sec:      float
     end_sec:        float
-    original_score: float   # preserved from ScoredSegment for reference
+    original_score: float
 
     @property
     def duration(self) -> float:
@@ -46,26 +47,19 @@ class CleanSegment:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def clean_segments(
-    segments:       list[ScoredSegment],
-    video_duration: float,                  # total video length in seconds
-    min_duration_s: float = MIN_DURATION_S,
-    max_duration_s: float = MAX_DURATION_S,
-    padding_s:      float = PADDING_S,
-    min_gap_s:      float = MIN_GAP_S,
+    segments:        list[ScoredSegment],
+    video_duration:  float,
+    min_duration_s:  float = MIN_DURATION_S,
+    max_duration_s:  float = MAX_DURATION_S,
+    padding_s:       float = PADDING_S,
+    min_gap_s:       float = MIN_GAP_S,
+    post_trim_min_s: float = POST_TRIM_MIN_S,
 ) -> list[CleanSegment]:
     """
-    Clean, validate, and resolve overlaps for a list of scored segments.
+    Clean, validate, and resolve overlaps for scored segments.
 
-    Args:
-        segments:       Output of scorer.rank_segments().
-        video_duration: Full video length in seconds (for clamping).
-        min_duration_s: Drop clips shorter than this after padding.
-        max_duration_s: Trim clips longer than this (from the end).
-        padding_s:      Seconds to add before start and after end.
-        min_gap_s:      Minimum gap between two clips after overlap trimming.
-
-    Returns:
-        List of CleanSegment sorted by start time, ready for cut_video().
+    Since scorer.py now guarantees diversity (no two clips are close),
+    overlaps here are rare — this is a safety net, not the main filter.
     """
     if not segments:
         print("[Cleaner] ⚠️  No segments to clean.")
@@ -73,13 +67,13 @@ def clean_segments(
 
     print(f"\n[Cleaner] Cleaning {len(segments)} segments …")
 
-    # ── 1. Apply padding + enforce max duration ───────────────────────────────
+    # ── 1. Apply padding + clamp to video bounds ──────────────────────────────
     padded = []
     for seg in segments:
         start = max(0.0, seg.start_sec - padding_s)
         end   = min(video_duration, seg.end_sec + padding_s)
 
-        # if padding made it too long, trim from the end
+        # if padding pushed over max duration, trim from end
         if (end - start) > max_duration_s:
             end = start + max_duration_s
 
@@ -89,60 +83,53 @@ def clean_segments(
             original_score = seg.combined_score,
         ))
 
-    # ── 2. Sort by start time (required for overlap detection) ────────────────
+    # ── 2. Sort by start time ─────────────────────────────────────────────────
     padded.sort(key=lambda s: s.start_sec)
 
-    # ── 3. Enforce min duration (after padding) ───────────────────────────────
+    # ── 3. Enforce min duration ───────────────────────────────────────────────
     duration_filtered = [s for s in padded if s.duration >= min_duration_s]
-
     dropped = len(padded) - len(duration_filtered)
     if dropped:
         print(f"[Cleaner] Dropped {dropped} clip(s) shorter than {min_duration_s}s")
 
     if not duration_filtered:
-        print(f"[Cleaner] ⚠️  All segments dropped by duration filter.")
-        print(f"[Cleaner] Tip: lower MIN_DURATION_S in config (currently {min_duration_s}s)")
+        print(f"[Cleaner] ⚠️  All segments dropped. Lowering min to {post_trim_min_s}s as fallback.")
+        duration_filtered = [s for s in padded if s.duration >= post_trim_min_s]
+
+    if not duration_filtered:
+        print("[Cleaner] ⚠️  Still no segments. Check WINDOW_FRAMES in config.")
         return []
 
-    # ── 4. Resolve overlaps by trimming (keep both clips) ────────────────────
+    # ── 4. Resolve overlaps by trimming (keep both) ───────────────────────────
     resolved = [duration_filtered[0]]
 
     for current in duration_filtered[1:]:
-        prev = resolved[-1]
-
+        prev    = resolved[-1]
         overlap = prev.end_sec - current.start_sec
 
         if overlap > 0:
-            # trim: split the overlap evenly between the two clips
             trim = overlap / 2.0 + min_gap_s / 2.0
-
-            # shorten previous clip's end
-            new_prev_end = prev.end_sec - trim
-
-            # push current clip's start forward
-            new_curr_start = current.start_sec + trim
-
-            # update previous in place
             resolved[-1] = CleanSegment(
                 start_sec      = prev.start_sec,
-                end_sec        = new_prev_end,
+                end_sec        = prev.end_sec - trim,
                 original_score = prev.original_score,
             )
-
             current = CleanSegment(
-                start_sec      = new_curr_start,
+                start_sec      = current.start_sec + trim,
                 end_sec        = current.end_sec,
                 original_score = current.original_score,
             )
 
         resolved.append(current)
 
-    # ── 5. Final duration check after overlap trimming ────────────────────────
-    final = [s for s in resolved if s.duration >= min_duration_s]
+    # ── 5. Final check — use relaxed minimum after trimming ───────────────────
+    # scorer already spread clips apart so trimming should be minimal here
+    final = [s for s in resolved if s.duration >= post_trim_min_s]
 
-    dropped_after_trim = len(resolved) - len(final)
-    if dropped_after_trim:
-        print(f"[Cleaner] Dropped {dropped_after_trim} clip(s) too short after overlap trim")
+    dropped_after = len(resolved) - len(final)
+    if dropped_after:
+        print(f"[Cleaner] Dropped {dropped_after} clip(s) too short after overlap trim "
+              f"(post-trim minimum: {post_trim_min_s}s)")
 
     # ── 6. Report ─────────────────────────────────────────────────────────────
     print(f"[Cleaner] ✅ {len(final)} clean clip(s) ready:")
@@ -156,14 +143,4 @@ def clean_segments(
 
 
 def to_timestamps(segments: list[CleanSegment]) -> list[tuple[float, float]]:
-    """
-    Convert CleanSegment list to plain (start_sec, end_sec) tuples
-    ready to pass into cut_video().
-
-    Args:
-        segments: Output of clean_segments().
-
-    Returns:
-        List of (start_sec, end_sec) tuples.
-    """
     return [(seg.start_sec, seg.end_sec) for seg in segments]
