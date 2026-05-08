@@ -14,6 +14,9 @@ openai-whisper>=20231117
 transformers>=4.38.0
 torch>=2.0.0
 
+# ── FFmpeg (cloud-safe fallback) ──────────────────────────────
+imageio-ffmpeg>=0.4.9
+
 # ── Plotting ──────────────────────────────────────────────────
 matplotlib>=3.7.0
 
