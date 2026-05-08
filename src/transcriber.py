@@ -5,15 +5,15 @@ Responsible for ONE thing only:
     Transcribe audio segments using Whisper and return
     hype keyword hits with timestamps.
 
-Key improvement: transcribes only peak regions, not the full audio.
-This reduces transcription time from ~7 min to ~30-60 sec.
+Cloud fix: audio is loaded via librosa and passed to Whisper
+as a numpy array instead of a file path — avoids Whisper's
+internal FFmpeg dependency which breaks on Streamlit Cloud.
 """
 
 import os
 import whisper
 import numpy as np
 import librosa
-import soundfile as sf
 from dataclasses import dataclass
 
 
@@ -41,7 +41,7 @@ class TranscribedSegment:
     start:          float   # seconds (relative to original audio)
     end:            float   # seconds (relative to original audio)
     keyword_score:  int     # number of hype keywords found
-    avg_confidence: float   # whisper avg log-prob (-1.0 = ok, lower = gibberish)
+    avg_confidence: float   # whisper avg log-prob
 
 
 def load_model(model_size: str = MODEL_SIZE) -> whisper.Whisper:
@@ -53,43 +53,36 @@ def load_model(model_size: str = MODEL_SIZE) -> whisper.Whisper:
 
 
 def transcribe_segments(
-    audio_path:   str,
-    peak_times:   list[tuple[float, float]],
-    model:        whisper.Whisper,
-    temp_dir:     str = None,
+    audio_path:  str,
+    peak_times:  list[tuple[float, float]],
+    model:       whisper.Whisper,
+    temp_dir:    str = None,   # kept for API compatibility, no longer used
 ) -> list[TranscribedSegment]:
     """
     Transcribe ONLY the peak regions instead of the full audio.
+
+    Cloud-safe: loads audio via librosa and passes numpy arrays
+    directly to Whisper — no FFmpeg dependency, no temp files.
 
     Args:
         audio_path:  Path to full .wav file.
         peak_times:  List of (start_sec, end_sec) for each energy peak.
         model:       Loaded Whisper model.
-        temp_dir:    Directory for temp audio chunks. Defaults to a folder
-                     next to the audio file so it always resolves correctly.
+        temp_dir:    Ignored — kept for backward compatibility.
 
     Returns:
         List of TranscribedSegment with timestamps relative to original audio.
     """
-    # always resolve to absolute path — Streamlit changes cwd which breaks
-    # relative paths like "output/temp_chunks"
-    if temp_dir is None:
-        audio_abs = os.path.abspath(audio_path)
-        temp_dir  = os.path.join(os.path.dirname(audio_abs), "temp_chunks")
-
-    temp_dir = os.path.abspath(temp_dir)
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # load full audio once
-    y, sr = librosa.load(audio_path, sr=None)
+    # load full audio once using librosa (no FFmpeg needed)
+    print(f"[Whisper] Loading audio via librosa: {audio_path}")
+    y, sr = librosa.load(audio_path, sr=16000)   # Whisper expects 16kHz
+    print(f"[Whisper] Audio loaded — {len(y)/sr:.1f}s at {sr}Hz")
 
     all_segments = []
-
     print(f"[Whisper] Transcribing {len(peak_times)} peak regions …")
-    print(f"[Whisper] Temp dir: {temp_dir}")
 
     for i, (start_s, end_s) in enumerate(peak_times):
-        # slice the audio chunk
+        # slice audio chunk directly from numpy array — no temp file needed
         start_sample = int(start_s * sr)
         end_sample   = int(end_s   * sr)
         chunk        = y[start_sample:end_sample]
@@ -97,16 +90,16 @@ def transcribe_segments(
         if len(chunk) == 0:
             continue
 
-        # write temp chunk using absolute path
-        chunk_path = os.path.join(temp_dir, f"chunk_{i:03d}.wav")
-        sf.write(chunk_path, chunk, sr)
+        # convert to float32 as Whisper expects
+        chunk = chunk.astype(np.float32)
 
-        # transcribe
+        # pass numpy array directly — bypasses Whisper's internal FFmpeg call
         result = model.transcribe(
-            chunk_path,
-            language=LANGUAGE,
-            verbose=False,
-            fp16=False,
+            chunk,
+            language        = LANGUAGE,
+            verbose         = False,
+            fp16            = False,
+            task            = "transcribe",
         )
 
         # collect segments, adjusting timestamps back to original audio time
@@ -123,18 +116,7 @@ def transcribe_segments(
                 avg_confidence = seg.get("avg_logprob", -1.0),
             ))
 
-        # clean up temp chunk
-        if os.path.exists(chunk_path):
-            os.remove(chunk_path)
-
         print(f"  [{i+1:02d}/{len(peak_times)}] {start_s:.1f}s → {end_s:.1f}s  transcribed")
-
-    # clean up temp dir if empty
-    try:
-        if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-            os.rmdir(temp_dir)
-    except OSError:
-        pass  # not critical if cleanup fails
 
     print(f"[Whisper] Done — {len(all_segments)} segments transcribed.")
     return all_segments
@@ -147,14 +129,6 @@ def get_high_value_segments(
 ) -> list[TranscribedSegment]:
     """
     Filter to segments containing hype keywords above confidence threshold.
-
-    Args:
-        segments:       Output of transcribe_segments().
-        min_keywords:   Minimum hype keyword hits to keep a segment.
-        min_confidence: Minimum Whisper confidence (avg log-prob).
-
-    Returns:
-        Filtered list sorted by keyword_score descending.
     """
     filtered = [
         s for s in segments
