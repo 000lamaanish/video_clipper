@@ -9,7 +9,6 @@ import os
 import sys
 import time
 import tempfile
-import subprocess
 import matplotlib.pyplot as plt
 import streamlit as st
 
@@ -21,6 +20,7 @@ from transcriber      import load_model, transcribe_segments, get_high_value_seg
 from emotion_detector import load_emotion_model, analyze_emotions
 from scorer           import rank_segments
 from cleaner          import clean_segments, to_timestamps
+from video_cutter     import cut_video
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -365,35 +365,17 @@ if run_button:
         progress = st.progress(0, text="Starting …")
         created  = []
 
-        for i, (start, end) in enumerate(final_timestamps):
-            progress.progress(
-                int((i / len(final_timestamps)) * 100),
-                text=f"Cutting clip {i+1}/{len(final_timestamps)} …",
+        with st.spinner("Cutting clips …"):
+            created = cut_video(
+                input_video   = video_path,
+                segments      = final_timestamps,
+                output_folder = output_folder,
             )
-            clip_path = os.path.join(output_folder, f"clip_{i:03d}.mp4")
-            command   = [
-                "ffmpeg", "-y",
-                "-ss", str(start),
-                "-to", str(end),
-                "-i", video_path,
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                "-avoid_negative_ts", "make_zero",
-                clip_path,
-            ]
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            if result.returncode == 0 and os.path.exists(clip_path):
-                created.append(clip_path)
-            else:
-                st.warning(f"⚠️ FFmpeg failed for clip {i}")
-
         progress.progress(100, text="Done!")
-        st.success(f"✅ {len(created)} clip(s) saved to `{output_folder}`")
+        if created:
+            st.success(f"✅ {len(created)} clip(s) saved to `{output_folder}`")
+        else:
+            st.error("❌ FFmpeg failed to cut clips. Check logs.")
 
     # ── Results ────────────────────────────────────────────────
     st.divider()
