@@ -302,7 +302,7 @@ if run_button:
                 "Emotion":   f"{s.emotion_score:.3f}",
                 "Speech":    f"{s.speech_score:.3f}",
             } for s in top_segments])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df)
         st.success(f"✅ {len(top_segments)} segments ranked.")
 
     # ── Step 7: Cleaning ───────────────────────────────────────
@@ -330,7 +330,7 @@ if run_button:
             "End (s)":   f"{e:.1f}",
             "Duration":  f"{e-s:.1f}s",
         } for i, (s, e) in enumerate(final_timestamps)])
-        st.dataframe(df2, use_container_width=True)
+        st.dataframe(df2)
         st.success(f"✅ {len(final_timestamps)} clean clip(s) ready.")
 
     # ── Step 8: Energy Plot ────────────────────────────────────

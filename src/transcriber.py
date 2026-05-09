@@ -135,6 +135,18 @@ def get_high_value_segments(
         if s.keyword_score  >= min_keywords
         and s.avg_confidence >= min_confidence
     ]
+
+    # deduplicate — remove segments with identical text and overlapping timestamps
+    deduped = []
+    for seg in filtered:
+        is_dup = any(
+            s.text == seg.text and abs(s.start - seg.start) < 2.0
+            for s in deduped
+        )
+        if not is_dup:
+            deduped.append(seg)
+    filtered = deduped
+
     filtered.sort(key=lambda s: s.keyword_score, reverse=True)
 
     print(f"[Whisper] Hype segments found: {len(filtered)}")
